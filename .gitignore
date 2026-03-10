@@ -4,6 +4,11 @@
 
 ## User settings
 xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.pbxuser
+xcuserdata/
+**/xcuserdata/
 
 ## Obj-C/Swift specific
 *.hmap
