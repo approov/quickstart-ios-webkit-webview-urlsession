@@ -1,6 +1,6 @@
 # Approov WebView Quickstart for iOS
 
-Provides instructions on how to effectively protect WebView using the Approov SDK.
+Provides instructions on how to effectively protect WebView using the Approov SDK, including Approov Dynamic Pinning.
 
 The quickstart is designed for WebView apps that need Approov protection on:
 
@@ -39,6 +39,7 @@ The reusable bridge in `WebViewShapes/ApproovWebViewBridge.swift` covers:
 - `requestSubmit()` flows that eventually produce a normal submit event
 - cookie synchronization between `WKHTTPCookieStore` and native `URLSession`
 - simulated current-frame navigations for form responses using `WKWebView.loadSimulatedRequest(...)`
+- dynamic pinning
 
 That makes it suitable for the common WebView app pattern where:
 

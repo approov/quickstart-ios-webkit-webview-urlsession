@@ -228,14 +228,28 @@ private final class ApproovWebViewCookieBridge {
 /// - Approov SDK lazy initialization
 /// - cookie synchronization between WebKit and URLSession
 /// - request mutation and token injection
+/// - dynamic pinning for protected requests via `ApproovURLSession`
 /// - the choice between returning a JavaScript response and loading a
 ///   navigation result back into the WebView
+///
+/// Important implementation detail:
+/// `ApproovURLSession` does not protect the async `URLSession.data(for:)`
+/// convenience API. To actually get Approov interception and dynamic pinning
+/// we must execute requests through the completion-handler `dataTask(...)`
+/// path and wrap that in async/await ourselves.
 private actor ApproovWebViewRequestExecutor {
+    /// Internal request metadata key used to tell the Approov mutator whether
+    /// dynamic pinning should be applied to a specific request.
+    ///
+    /// We store this as a URL loading-system property so it stays out of the
+    /// wire-visible HTTP headers.
+    private static let pinningEnabledRequestProperty = "ApproovWebViewBridge.PinningEnabled"
+
     private let configuration: ApproovWebViewConfiguration
     private let cookieBridge: ApproovWebViewCookieBridge
     private let logger: Logger
     private let cookieStorage = HTTPCookieStorage()
-    private let urlSession: URLSession
+    private let urlSession: ApproovURLSession
     private var didInitializeApproov = false
 
     init(
@@ -255,7 +269,7 @@ private actor ApproovWebViewRequestExecutor {
         sessionConfiguration.httpShouldSetCookies = true
         sessionConfiguration.requestCachePolicy = .reloadIgnoringLocalCacheData
         sessionConfiguration.urlCache = nil
-        self.urlSession = URLSession(configuration: sessionConfiguration)
+        self.urlSession = ApproovURLSession(configuration: sessionConfiguration)
     }
 
     /// Executes a page-originated request natively.
@@ -269,12 +283,15 @@ private actor ApproovWebViewRequestExecutor {
         // customization before the request is executed.
         request = configuration.mutateRequest(request)
 
+        var shouldApplyApproovPinning = false
+
         if configuration.shouldAttemptApproovProtection(requestContext.requestURL) {
             if let approovToken = try await fetchApproovTokenIfPossible(for: requestContext.requestURL) {
                 request.setValue(
                     approovToken,
                     forHTTPHeaderField: configuration.approovTokenHeaderName
                 )
+                shouldApplyApproovPinning = true
             } else if !configuration.allowRequestsWithoutApproovToken {
                 throw ApproovWebViewBridgeError.approovTokenUnavailable(
                     requestContext.requestURL.absoluteString
@@ -282,7 +299,9 @@ private actor ApproovWebViewRequestExecutor {
             }
         }
 
-        let (data, response) = try await urlSession.data(for: request)
+        Self.setPinningEnabled(shouldApplyApproovPinning, on: &request)
+
+        let (data, response) = try await performPinnedRequest(request)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw ApproovWebViewBridgeError.nonHTTPResponse
         }
@@ -423,13 +442,22 @@ private actor ApproovWebViewRequestExecutor {
         }
 
         try ApproovService.initialize(config: trimmedConfig)
-
         // The bridge adds the JWT manually, but configuring the same header
         // name in the Approov service keeps the contract aligned with the rest
         // of the app if the SDK is reused elsewhere.
         ApproovService.setApproovHeader(
             header: configuration.approovTokenHeaderName,
             prefix: ""
+        )
+        ApproovService.setServiceMutator(
+            ApproovWebViewPinningMutator(
+                shouldApplyPinning: { [configuration] request in
+                    Self.shouldApplyPinning(
+                        for: request,
+                        fallback: configuration.shouldAttemptApproovProtection
+                    )
+                }
+            )
         )
 
         didInitializeApproov = true
@@ -472,6 +500,32 @@ private actor ApproovWebViewRequestExecutor {
                     continuation.resume(throwing: error)
                 }
             }
+        }
+    }
+
+    /// Executes the request through `ApproovURLSession` so the session's
+    /// interceptor and pinning delegate are actually involved.
+    ///
+    /// We intentionally do not use `URLSession.data(for:)` here because the
+    /// Approov URLSession wrapper documents that the iOS 15 async transfer APIs
+    /// are not protected.
+    private func performPinnedRequest(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        try await withCheckedThrowingContinuation { continuation in
+            let task = urlSession.dataTask(with: request) { data, response, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+
+                guard let data, let response else {
+                    continuation.resume(throwing: ApproovWebViewBridgeError.nonHTTPResponse)
+                    return
+                }
+
+                continuation.resume(returning: (data, response))
+            }
+
+            task.resume()
         }
     }
 
@@ -519,6 +573,57 @@ private actor ApproovWebViewRequestExecutor {
         }
 
         return "\(scheme)://\(host)"
+    }
+
+    private static func setPinningEnabled(_ enabled: Bool, on request: inout URLRequest) {
+        let mutableRequest = (request as NSURLRequest).mutableCopy() as! NSMutableURLRequest
+        URLProtocol.setProperty(
+            enabled,
+            forKey: pinningEnabledRequestProperty,
+            in: mutableRequest
+        )
+        request = mutableRequest as URLRequest
+    }
+
+    private static func shouldApplyPinning(
+        for request: URLRequest,
+        fallback: (URL) -> Bool
+    ) -> Bool {
+        if let explicitDecision = URLProtocol.property(
+            forKey: pinningEnabledRequestProperty,
+            in: request
+        ) as? Bool {
+            return explicitDecision
+        }
+
+        guard let url = request.url else {
+            return false
+        }
+
+        return fallback(url)
+    }
+}
+
+/// Customizes the Approov URLSession wrapper so this bridge can use:
+/// - manual JWT fetch and fail-open/fail-closed behavior from app policy
+/// - Approov dynamic pinning for requests that actually received Approov
+///   protection
+///
+/// The interceptor is disabled because the bridge already owns token fetching
+/// and request mutation. Pinning remains enabled on a per-request basis.
+private final class ApproovWebViewPinningMutator: ApproovServiceMutator {
+    private nonisolated(unsafe) let shouldApplyPinning: @Sendable (URLRequest) -> Bool
+
+    nonisolated init(shouldApplyPinning: @escaping @Sendable (URLRequest) -> Bool) {
+        self.shouldApplyPinning = shouldApplyPinning
+    }
+
+    nonisolated func handleInterceptorShouldProcessRequest(_ request: URLRequest) throws -> Bool {
+        false
+    }
+
+    nonisolated func handlePinningShouldProcessRequest(_ request: URLRequest) -> Bool {
+        shouldApplyPinning(request)
     }
 }
 
@@ -709,7 +814,7 @@ extension ApproovWebView {
 /// - forms targeting another window or named frame
 ///
 /// Those boundaries are documented in the README because they are platform
-/// limits.
+/// limits, not omissions in the sample.
 private enum ApproovWebViewJavaScriptBridge {
     private static let handlerPlaceholder = "__APPROOV_BRIDGE_HANDLER__"
 
