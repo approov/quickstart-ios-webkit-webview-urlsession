@@ -28,7 +28,7 @@ Because of that, the safe approach is:
 
 The demo page calls `https://shapes.approov.io/v2/shapes`, which also requires the API key `yXClypapWNHIifHUWmBIyPFAm`. The API key is injected natively so the page never needs to know it.
 
-## What This Quickstart Now Covers
+## What This Quickstart Covers
 
 The reusable bridge in `WebViewShapes/ApproovWebViewBridge.swift` covers:
 
