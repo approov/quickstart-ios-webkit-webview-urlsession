@@ -28,6 +28,78 @@ Because of that, the safe approach is:
 
 The demo page calls `https://shapes.approov.io/v2/shapes`, which also requires the API key `yXClypapWNHIifHUWmBIyPFAm`. The API key is injected natively so the page never needs to know it.
 
+## Detailed Runtime Sequence
+
+The sequence below matches the bridge implementation in `WebViewShapes/ApproovWebViewBridge.swift` and shows both API-style responses and form-navigation responses.
+
+```mermaid
+    sequenceDiagram
+    autonumber
+    actor User
+    participant Page as Web Page (js)
+    participant JSBridge as Injected JS Bridge (js)
+    participant Coordinator as WKScriptMessageHandlerWithReply (swift)
+    participant Executor as ApproovWebViewRequestExecutor actor (swift)
+    participant Cookies as WKHTTPCookieStore (swift/WebKit)
+    participant Approov as ApproovService SDK (swift)
+    participant Session as ApproovURLSession (swift)
+    participant API as Protected API (server)
+
+    User->>Page: Trigger fetch(...) (js), XHR.send(...) (js), or form submit (js)
+    Page->>JSBridge: serializeRequest(...) (js) and body -> base64
+
+    alt Request is not HTTP(S)
+        JSBridge->>Page: originalFetch(...) / native XHR fallback (js)
+    else Request is HTTP(S)
+        JSBridge->>Coordinator: postMessage(payload) (js)
+        Coordinator->>Executor: execute(proxyRequest) (swift)
+
+        Executor->>Cookies: allCookies() (swift)
+        Cookies-->>Executor: Cookies
+        Executor->>Executor: Copy cookies into native HTTPCookieStorage
+        Executor->>Executor: Build URLRequest + apply browser context headers
+        Executor->>Executor: mutateRequest(...) (swift) for native-only headers
+
+        alt shouldAttemptApproovProtection(url) == true
+            Executor->>Approov: initialize(config:) (swift) if needed
+            Executor->>Approov: fetchToken(url:) (swift)
+
+            alt Token returned
+                Approov-->>Executor: JWT
+                Executor->>Executor: Set approov-token header
+                Executor->>Executor: Enable per-request dynamic pinning
+            else Token missing or fetch failed
+                alt allowRequestsWithoutApproovToken == false
+                    Executor-->>Coordinator: Throw error
+                    Coordinator-->>JSBridge: reply(error)
+                    JSBridge-->>Page: Promise/XHR/form error path
+                else allowRequestsWithoutApproovToken == true
+                    Executor->>Executor: Continue without JWT (no pinning)
+                end
+            end
+        else shouldAttemptApproovProtection(url) == false
+            Executor->>Executor: Skip token and pinning
+        end
+
+        Executor->>Session: dataTask(with:) (swift)
+        Session->>API: HTTPS request (optional Approov JWT)
+        API-->>Session: Response + Set-Cookie
+        Session-->>Executor: Data + HTTPURLResponse
+
+        Executor->>Cookies: setCookies(...) (swift)
+
+        alt responseHandling == "response" (fetch/XHR or form response mode)
+            Executor-->>Coordinator: status + headers + bodyBase64
+            Coordinator-->>JSBridge: reply(proxyResponse)
+            JSBridge-->>Page: new Response(...) (js) / XHR state updates (js) / dispatch approov:form-response (js)
+        else responseHandling == "navigation" (same-frame form navigation)
+            Executor-->>Coordinator: navigation load payload
+            Coordinator->>Page: webView.loadSimulatedRequest(...) (swift)
+            Coordinator-->>JSBridge: reply({navigationStarted: true})
+        end
+    end
+```
+
 ## What This Quickstart Covers
 
 The reusable bridge in `WebViewShapes/ApproovWebViewBridge.swift` covers:
@@ -81,6 +153,8 @@ The safest production patterns are:
   - Demonstrates both `fetch()` and real HTML form submission.
 - `WebViewShapes/ContentView.swift`
   - Minimal SwiftUI host view.
+- `JS_BRIDGE_DESIGN.md`
+  - Detailed design walkthrough of bridge injection, interception behavior, and JS/native forwarding.
 
 ## Production Notes
 
