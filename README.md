@@ -28,9 +28,48 @@ Because of that, the safe approach is:
 
 The demo page calls `https://shapes.approov.io/v2/shapes`, which also requires the API key `yXClypapWNHIifHUWmBIyPFAm`. The API key is injected natively so the page never needs to know it.
 
+## Architecture Flow
+
+```mermaid
+flowchart LR
+    subgraph WebView["WebView / Page Layer"]
+        User["User"]
+        Page["Web app code (js)<br/>fetch / XHR / form submit"]
+        Bridge["Injected JS bridge (js)<br/>serialize request + postMessage(...)"]
+        User --> Page
+        Page --> Bridge
+    end
+
+    subgraph Native["Native iOS Layer"]
+        Coordinator["WKScriptMessageHandlerWithReply (swift)"]
+        Executor["ApproovWebViewRequestExecutor actor (swift)"]
+        Cookies["WKHTTPCookieStore + HTTPCookieStorage (swift/WebKit)"]
+        Mutate["mutateRequest(...) (swift)<br/>native-only headers / API keys"]
+        Token["ApproovService.fetchToken(...) (swift)"]
+        Session["ApproovURLSession.dataTask(...) (swift)"]
+
+        Coordinator --> Executor
+        Executor --> Cookies
+        Executor --> Mutate
+        Executor --> Token
+        Executor --> Session
+        Session --> Executor
+        Executor --> Coordinator
+    end
+
+    subgraph Backend["Backend Layer"]
+        API["Protected API (server)<br/>validates token and returns response"]
+    end
+
+    Bridge --> Coordinator
+    Session --> API
+    API --> Session
+    Coordinator --> Reply["JS Response object / XHR events (js)<br/>or loadSimulatedRequest(...) (swift)"]
+    Reply --> Page
+```
+
 ## Detailed Runtime Sequence
 
-The sequence below matches the bridge implementation in `WebViewShapes/ApproovWebViewBridge.swift` and shows both API-style responses and form-navigation responses.
 
 ```mermaid
     sequenceDiagram
