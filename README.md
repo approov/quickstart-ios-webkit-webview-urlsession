@@ -36,8 +36,8 @@ flowchart LR
         User["User"]
         Page["Web app code (js)<br/>fetch / XHR / form submit"]
         Bridge["Injected JS bridge (js)<br/>serialize request + postMessage(...)"]
-        User --> Page
-        Page --> Bridge
+        User -->|"Taps a button or submits a form"| Page
+        Page -->|"Uses normal browser APIs for data access"| Bridge
     end
 
     subgraph Native["Native iOS Layer"]
@@ -46,26 +46,32 @@ flowchart LR
         Cookies["WKHTTPCookieStore + HTTPCookieStorage (swift/WebKit)"]
         Mutate["mutateRequest(...) (swift)<br/>native-only headers / API keys"]
         Token["ApproovService.fetchToken(...) (swift)"]
+        Pinning["Approov dynamic pinning (swift)<br/>enabled per request inside ApproovURLSession"]
         Session["ApproovURLSession.dataTask(...) (swift)"]
 
-        Coordinator --> Executor
-        Executor --> Cookies
-        Executor --> Mutate
-        Executor --> Token
-        Executor --> Session
-        Session --> Executor
-        Executor --> Coordinator
+        Coordinator -->|"Decodes the JS payload and calls execute(proxyRequest)"| Executor
+        Executor -->|"Reads WebView cookies before the native call"| Cookies
+        Cookies -->|"Returns browser cookies for session continuity"| Executor
+        Executor -->|"Applies headers and secrets"| Mutate
+        Mutate -->|"Returns the updated URLRequest"| Executor
+        Executor -->|"If protected, asks Approov for a token"| Token
+        Token -->|"Returns an Approov token; if present, the request is marked for pinning"| Executor
+        Executor -->|"Passes the final request into the protected transport layer"| Pinning
+        Pinning -->|"ApproovURLSession applies TLS pinning during the HTTPS request"| Session
+        Session -->|"Returns status/headers/body/response cookies"| Executor
+        Executor -->|"Writes response cookies back into WebKit"| Cookies
+        Executor -->|"Builds either a proxy response or a navigation load"| Coordinator
     end
 
     subgraph Backend["Backend Layer"]
         API["Protected API (server)<br/>validates token and returns response"]
     end
 
-    Bridge --> Coordinator
-    Session --> API
-    API --> Session
+    Bridge -->|"Forwards URL, method, headers, body, and page URL to native"| Coordinator
+    Session -->|"HTTPS request to the protected backend"| API
+    API -->|"HTTP response and any Set-Cookie headers"| Session
     Coordinator --> Reply["JS Response object / XHR events (js)<br/>or loadSimulatedRequest(...) (swift)"]
-    Reply --> Page
+    Reply -->|"Delivers data back to the page or loads a new document"| Page
 ```
 
 ## Detailed Runtime Sequence
