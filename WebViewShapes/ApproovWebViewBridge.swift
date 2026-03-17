@@ -627,19 +627,13 @@ private final class ApproovWebViewPinningMutator: ApproovServiceMutator {
     }
 }
 
-/// SwiftUI wrapper around `WKWebView` that installs the Approov bridge.
-///
-/// This is the only UI type the host app needs to embed. The bridge details,
-/// cookie plumbing, and WebKit coordinator logic all stay hidden in this file.
-struct ApproovWebView: UIViewRepresentable {
-    let content: ApproovWebViewContent
-    let configuration: ApproovWebViewConfiguration
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(configuration: configuration)
-    }
-
-    func makeUIView(context: Context) -> WKWebView {
+/// Shared `WKWebView` builder used by both the SwiftUI and UIKit demos.
+private enum ApproovWebViewFactory {
+    static func makeWebView(
+        content: ApproovWebViewContent,
+        configuration: ApproovWebViewConfiguration,
+        coordinator: ApproovWebViewCoordinator
+    ) -> WKWebView {
         let userContentController = WKUserContentController()
 
         // Inject the bridge before any page code runs so page scripts cannot
@@ -656,7 +650,7 @@ struct ApproovWebView: UIViewRepresentable {
 
         userContentController.addUserScript(bridgeScript)
         userContentController.addScriptMessageHandler(
-            context.coordinator,
+            coordinator,
             contentWorld: .page,
             name: configuration.bridgeHandlerName
         )
@@ -674,7 +668,7 @@ struct ApproovWebView: UIViewRepresentable {
         webView.isOpaque = false
         webView.backgroundColor = .systemBackground
 
-        context.coordinator.attach(webView: webView)
+        coordinator.attach(webView: webView)
 
         switch content {
         case let .htmlString(html, baseURL):
@@ -685,117 +679,170 @@ struct ApproovWebView: UIViewRepresentable {
 
         return webView
     }
+}
+
+/// Receives JavaScript bridge messages and delegates execution to the actor
+/// that owns the native request pipeline.
+final class ApproovWebViewCoordinator: NSObject, WKScriptMessageHandlerWithReply {
+    private let configuration: ApproovWebViewConfiguration
+    private let decoder = JSONDecoder()
+    private let encoder = JSONEncoder()
+    private let logger: Logger
+    private weak var webView: WKWebView?
+    private var executor: ApproovWebViewRequestExecutor?
+
+    init(configuration: ApproovWebViewConfiguration) {
+        self.configuration = configuration
+        self.logger = Logger(
+            subsystem: configuration.loggerSubsystem,
+            category: configuration.loggerCategory
+        )
+    }
+
+    func attach(webView: WKWebView) {
+        self.webView = webView
+        self.executor = ApproovWebViewRequestExecutor(
+            configuration: configuration,
+            cookieBridge: ApproovWebViewCookieBridge(
+                store: webView.configuration.websiteDataStore.httpCookieStore
+            )
+        )
+    }
+
+    func userContentController(
+        _ userContentController: WKUserContentController,
+        didReceive message: WKScriptMessage,
+        replyHandler: @escaping (Any?, String?) -> Void
+    ) {
+        guard let executor else {
+            replyHandler(nil, "The native bridge is not ready yet.")
+            return
+        }
+
+        guard let bodyDictionary = message.body as? [String: Any] else {
+            replyHandler(nil, "The WebView bridge payload was not a dictionary.")
+            return
+        }
+
+        do {
+            let bodyData = try JSONSerialization.data(
+                withJSONObject: bodyDictionary,
+                options: []
+            )
+            let proxyRequest = try decoder.decode(
+                ApproovWebViewProxyRequest.self,
+                from: bodyData
+            )
+
+            Task {
+                do {
+                    let executionResult = try await executor.execute(proxyRequest)
+
+                    switch executionResult {
+                    case let .response(proxyResponse):
+                        let replyObject = try makeReplyObject(from: proxyResponse)
+                        replyHandler(replyObject, nil)
+
+                    case let .navigation(navigationLoad):
+                        try await MainActor.run {
+                            try applyNavigationLoad(navigationLoad)
+                        }
+                        replyHandler(["navigationStarted": true], nil)
+                    }
+                } catch {
+                    logger.error(
+                        "WebView bridge request failed: \(error.localizedDescription, privacy: .public)"
+                    )
+                    replyHandler(nil, error.localizedDescription)
+                }
+            }
+        } catch {
+            replyHandler(
+                nil,
+                "Failed to decode the WebView request: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func makeReplyObject(from response: ApproovWebViewProxyResponse) throws -> Any {
+        let encodedResponse = try encoder.encode(response)
+        return try JSONSerialization.jsonObject(with: encodedResponse, options: [])
+    }
+
+    /// Loads a native response back into the WebView as a real navigation.
+    ///
+    /// `loadSimulatedRequest(...)` is the public WebKit API that lets us
+    /// render a native HTTP response as if it had been produced by a page
+    /// navigation to the same URL. This is what makes current-frame form
+    /// submissions practical without falling back to `loadHTMLString`.
+    @MainActor
+    private func applyNavigationLoad(_ navigationLoad: ApproovWebViewNavigationLoad) throws {
+        guard let webView else {
+            throw ApproovWebViewBridgeError.webViewUnavailable
+        }
+
+        webView.loadSimulatedRequest(
+            navigationLoad.request,
+            response: navigationLoad.response,
+            responseData: navigationLoad.data
+        )
+    }
+}
+
+/// SwiftUI wrapper around `WKWebView` that installs the Approov bridge.
+///
+/// Keep this type in a SwiftUI app. A UIKit-only app can delete just this
+/// wrapper plus `import SwiftUI`, while keeping the shared bridge logic and
+/// `ApproovWebViewController` below.
+struct ApproovWebView: UIViewRepresentable {
+    let content: ApproovWebViewContent
+    let configuration: ApproovWebViewConfiguration
+
+    func makeCoordinator() -> ApproovWebViewCoordinator {
+        ApproovWebViewCoordinator(configuration: configuration)
+    }
+
+    func makeUIView(context: Context) -> WKWebView {
+        ApproovWebViewFactory.makeWebView(
+            content: content,
+            configuration: configuration,
+            coordinator: context.coordinator
+        )
+    }
 
     func updateUIView(_ webView: WKWebView, context: Context) {}
 }
 
-extension ApproovWebView {
-    /// Receives JavaScript bridge messages and delegates execution to the actor
-    /// that owns the native request pipeline.
-    final class Coordinator: NSObject, WKScriptMessageHandlerWithReply {
-        private let configuration: ApproovWebViewConfiguration
-        private let decoder = JSONDecoder()
-        private let encoder = JSONEncoder()
-        private let logger: Logger
-        private weak var webView: WKWebView?
-        private var executor: ApproovWebViewRequestExecutor?
+/// UIKit host for the same protected `WKWebView`.
+///
+/// In a UIKit-only app, set this controller as the window's root view
+/// controller and delete the SwiftUI host types from the sample.
+final class ApproovWebViewController: UIViewController {
+    private let content: ApproovWebViewContent
+    private let configuration: ApproovWebViewConfiguration
+    private lazy var coordinator = ApproovWebViewCoordinator(configuration: configuration)
+    private lazy var webView = ApproovWebViewFactory.makeWebView(
+        content: content,
+        configuration: configuration,
+        coordinator: coordinator
+    )
 
-        init(configuration: ApproovWebViewConfiguration) {
-            self.configuration = configuration
-            self.logger = Logger(
-                subsystem: configuration.loggerSubsystem,
-                category: configuration.loggerCategory
-            )
-        }
+    init(
+        content: ApproovWebViewContent,
+        configuration: ApproovWebViewConfiguration
+    ) {
+        self.content = content
+        self.configuration = configuration
+        super.init(nibName: nil, bundle: nil)
+    }
 
-        func attach(webView: WKWebView) {
-            self.webView = webView
-            self.executor = ApproovWebViewRequestExecutor(
-                configuration: configuration,
-                cookieBridge: ApproovWebViewCookieBridge(
-                    store: webView.configuration.websiteDataStore.httpCookieStore
-                )
-            )
-        }
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
 
-        func userContentController(
-            _ userContentController: WKUserContentController,
-            didReceive message: WKScriptMessage,
-            replyHandler: @escaping (Any?, String?) -> Void
-        ) {
-            guard let executor else {
-                replyHandler(nil, "The native bridge is not ready yet.")
-                return
-            }
-
-            guard let bodyDictionary = message.body as? [String: Any] else {
-                replyHandler(nil, "The WebView bridge payload was not a dictionary.")
-                return
-            }
-
-            do {
-                let bodyData = try JSONSerialization.data(
-                    withJSONObject: bodyDictionary,
-                    options: []
-                )
-                let proxyRequest = try decoder.decode(
-                    ApproovWebViewProxyRequest.self,
-                    from: bodyData
-                )
-
-                Task {
-                    do {
-                        let executionResult = try await executor.execute(proxyRequest)
-
-                        switch executionResult {
-                        case let .response(proxyResponse):
-                            let replyObject = try makeReplyObject(from: proxyResponse)
-                            replyHandler(replyObject, nil)
-
-                        case let .navigation(navigationLoad):
-                            try await MainActor.run {
-                                try applyNavigationLoad(navigationLoad)
-                            }
-                            replyHandler(["navigationStarted": true], nil)
-                        }
-                    } catch {
-                        logger.error(
-                            "WebView bridge request failed: \(error.localizedDescription, privacy: .public)"
-                        )
-                        replyHandler(nil, error.localizedDescription)
-                    }
-                }
-            } catch {
-                replyHandler(
-                    nil,
-                    "Failed to decode the WebView request: \(error.localizedDescription)"
-                )
-            }
-        }
-
-        private func makeReplyObject(from response: ApproovWebViewProxyResponse) throws -> Any {
-            let encodedResponse = try encoder.encode(response)
-            return try JSONSerialization.jsonObject(with: encodedResponse, options: [])
-        }
-
-        /// Loads a native response back into the WebView as a real navigation.
-        ///
-        /// `loadSimulatedRequest(...)` is the public WebKit API that lets us
-        /// render a native HTTP response as if it had been produced by a page
-        /// navigation to the same URL. This is what makes current-frame form
-        /// submissions practical without falling back to `loadHTMLString`.
-        @MainActor
-        private func applyNavigationLoad(_ navigationLoad: ApproovWebViewNavigationLoad) throws {
-            guard let webView else {
-                throw ApproovWebViewBridgeError.webViewUnavailable
-            }
-
-            webView.loadSimulatedRequest(
-                navigationLoad.request,
-                response: navigationLoad.response,
-                responseData: navigationLoad.data
-            )
-        }
+    override func loadView() {
+        view = webView
     }
 }
 

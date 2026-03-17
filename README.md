@@ -189,6 +189,7 @@ The safest production patterns are:
 
 - `WebViewShapes/ApproovWebViewBridge.swift`
   - Reusable bridge code.
+  - Includes both the SwiftUI `ApproovWebView` wrapper and the UIKit `ApproovWebViewController`.
   - This is the file to copy into another app.
 - `WebViewShapes/QuickstartConfiguration.swift`
   - Demo-specific configuration.
@@ -197,9 +198,29 @@ The safest production patterns are:
   - Local demo HTML loaded into the WebView.
   - Demonstrates both `fetch()` and real HTML form submission.
 - `WebViewShapes/ContentView.swift`
-  - Minimal SwiftUI host view.
+  - Demo chooser that lets this one sample app present both the SwiftUI and UIKit host variants.
 - `JS_BRIDGE_DESIGN.md`
   - Detailed design walkthrough of bridge injection, interception behavior, and JS/native forwarding.
+
+## SwiftUI And UIKit Hosts
+
+This sample now demonstrates both host styles in one app:
+
+- `ApproovWebView`
+  - SwiftUI wrapper around the protected `WKWebView`
+- `ApproovWebViewController`
+  - UIKit `UIViewController` that hosts the same protected `WKWebView`
+
+If you only want one style in your own app:
+
+- SwiftUI-only app
+  - Keep `ApproovWebView`
+  - Delete `ApproovWebViewController`
+  - In `ContentView.swift`, comment out the UIKit demo case
+- UIKit-only app
+  - Keep `ApproovWebViewController`
+  - Delete `ApproovWebView` and `import SwiftUI` from `ApproovWebViewBridge.swift`
+  - In `ContentView.swift`, comment out the SwiftUI demo case
 
 ## Production Notes
 
