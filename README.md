@@ -17,14 +17,13 @@ It also keeps browser cookies aligned between `WKWebView` and the native `URLSes
 Because of that, the safe approach is:
 
 1. Inject a JavaScript bridge at document start.
-2. Intercept Fetch, XHR, and current-frame form submission inside the page.
+2. Intercept only the protected Fetch, XHR, and current-frame form submission calls inside the page.
 3. Forward those requests into native Swift with `WKScriptMessageHandlerWithReply`.
 4. Sync WebKit cookies into native networking.
-5. Ask Approov for a JWT in native code.
-6. Add the `approov-token` header in Swift.
-7. Inject any native-only secrets, such as API keys, in Swift.
-8. Execute the request natively.
-9. Return the response back to JavaScript or, for form navigations, load the native response into the WebView with `loadSimulatedRequest(...)`.
+5. Initialize `ApproovURLSession` for the protected API allowlist.
+6. Inject any native-only secrets, such as API keys, in Swift.
+7. Execute the request natively and let `ApproovURLSession` add the token and apply pinning.
+8. Return the response back to JavaScript or, for form navigations, load the native response into the WebView with `loadSimulatedRequest(...)`.
 
 The demo page calls `https://shapes.approov.io/v2/shapes`, which also requires the API key `yXClypapWNHIifHUWmBIyPFAm`. The API key is injected natively so the page never needs to know it.
 
@@ -45,8 +44,8 @@ flowchart LR
         Executor["ApproovWebViewRequestExecutor actor (swift)"]
         Cookies["WKHTTPCookieStore + HTTPCookieStorage (swift/WebKit)"]
         Mutate["mutateRequest(...) (swift)<br/>native-only headers / API keys"]
-        Token["ApproovService.fetchToken(...) (swift)"]
-        Pinning["Approov dynamic pinning (swift)<br/>enabled per request inside ApproovURLSession"]
+        Approov["ApproovService.initialize(...) (swift)"]
+        Pinning["Approov token injection + dynamic pinning (swift)<br/>inside ApproovURLSession"]
         Session["ApproovURLSession.dataTask(...) (swift)"]
 
         Coordinator -->|"Decodes the JS payload and calls execute(proxyRequest)"| Executor
@@ -54,8 +53,7 @@ flowchart LR
         Cookies -->|"Returns browser cookies for session continuity"| Executor
         Executor -->|"Applies headers and secrets"| Mutate
         Mutate -->|"Returns the updated URLRequest"| Executor
-        Executor -->|"If protected, asks Approov for a token"| Token
-        Token -->|"Returns an Approov token; if present, the request is marked for pinning"| Executor
+        Executor -->|"Initializes Approov for protected traffic if needed"| Approov
         Executor -->|"Passes the final request into the protected transport layer"| Pinning
         Pinning -->|"ApproovURLSession applies TLS pinning during the HTTPS request"| Session
         Session -->|"Returns status/headers/body/response cookies"| Executor
@@ -93,9 +91,9 @@ flowchart LR
     User->>Page: Trigger fetch(...) (js), XHR.send(...) (js), or form submit (js)
     Page->>JSBridge: serializeRequest(...) (js) and body -> base64
 
-    alt Request is not HTTP(S)
+    alt Request is not in the protected allowlist
         JSBridge->>Page: originalFetch(...) / native XHR fallback (js)
-    else Request is HTTP(S)
+    else Request matches the protected allowlist
         JSBridge->>Coordinator: postMessage(payload) (js)
         Coordinator->>Executor: execute(proxyRequest) (swift)
 
@@ -104,30 +102,10 @@ flowchart LR
         Executor->>Executor: Copy cookies into native HTTPCookieStorage
         Executor->>Executor: Build URLRequest + apply browser context headers
         Executor->>Executor: mutateRequest(...) (swift) for native-only headers
-
-        alt shouldAttemptApproovProtection(url) == true
-            Executor->>Approov: initialize(config:) (swift) if needed
-            Executor->>Approov: fetchToken(url:) (swift)
-
-            alt Token returned
-                Approov-->>Executor: JWT
-                Executor->>Executor: Set approov-token header
-                Executor->>Executor: Enable per-request dynamic pinning
-            else Token missing or fetch failed
-                alt allowRequestsWithoutApproovToken == false
-                    Executor-->>Coordinator: Throw error
-                    Coordinator-->>JSBridge: reply(error)
-                    JSBridge-->>Page: Promise/XHR/form error path
-                else allowRequestsWithoutApproovToken == true
-                    Executor->>Executor: Continue without JWT (no pinning)
-                end
-            end
-        else shouldAttemptApproovProtection(url) == false
-            Executor->>Executor: Skip token and pinning
-        end
+        Executor->>Approov: initialize(config:) (swift) if needed
 
         Executor->>Session: dataTask(with:) (swift)
-        Session->>API: HTTPS request (optional Approov JWT)
+        Session->>API: HTTPS request (ApproovURLSession adds JWT/pinning when available)
         API-->>Session: Response + Set-Cookie
         Session-->>Executor: Data + HTTPURLResponse
 
@@ -290,7 +268,7 @@ If you adapt this quickstart to your own backend, the server must validate the J
 
 - `approovConfig`
 - `shapesEndpoint`
-- `shouldAttemptApproovProtection`
+- `protectedEndpoints`
 - `mutateRequest`
 
 ## Reusing the Bridge in Another App
@@ -316,11 +294,14 @@ Example:
 ```swift
 let config = ApproovWebViewConfiguration(
     approovConfig: "<your-approov-config>",
+    protectedEndpoints: [
+        ApproovWebViewProtectedEndpoint(
+            host: "api.example.com",
+            pathPrefix: "/v1/private"
+        )
+    ],
     approovTokenHeaderName: "approov-token",
     allowRequestsWithoutApproovToken: false,
-    shouldAttemptApproovProtection: { url in
-        url.host?.lowercased() == "api.example.com"
-    },
     mutateRequest: { request in
         var request = request
 
@@ -353,7 +334,7 @@ ApproovWebView(
 
 ## Best Practices
 
-- Prefer a strict allowlist in `shouldAttemptApproovProtection`.
+- Prefer a strict allowlist in `protectedEndpoints`.
 - Keep native-only secrets in `mutateRequest`, never in page JavaScript.
 - Keep protected endpoints on Fetch, XHR, or current-frame form submission.
 - Keep the WebView on the default website data store unless you have a strong reason to isolate cookies.

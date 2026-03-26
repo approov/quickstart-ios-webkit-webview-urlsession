@@ -7,17 +7,15 @@ It is grounded in the implementation in:
 - `WebViewShapes/ShapesQuickstartPage.swift` (demo page usage)
 
 
-We install a JavaScript bridge at document start inside the WebView. It transparently wraps fetch, XHR, and current-frame form submits. Those requests are forwarded to native Swift using `WKScriptMessageHandlerWithReply`. Native code syncs cookies, applies native-only headers, fetches an Approov token, and sends the request through `ApproovURLSession` for dynamic pinning. The response is then returned back to JavaScript as a normal response object, or loaded as a simulated navigation for form flows. So web app code remains standard while security decisions stay in native code.
+We install a JavaScript bridge at document start inside the WebView. It transparently wraps fetch, XHR, and current-frame form submits for a strict protected-endpoint allowlist. Only those matching requests are forwarded to native Swift using `WKScriptMessageHandlerWithReply`. Native code syncs cookies, applies native-only headers, initializes the Approov service layer, and sends the request through `ApproovURLSession` for token injection and dynamic pinning. The response is then returned back to JavaScript as a normal response object, or loaded as a simulated navigation for form flows. So web app code remains standard while security decisions stay in native code.
 
 ## 1. Why This Bridge Exists
 
 Public `WKWebView` APIs do not provide a reliable way to mutate headers for arbitrary built-in browser requests before WebKit sends them.
 
 For Approov integration, we need a controlled request path where native code can:
-- request an Approov token
-- inject the token into the request headers
 - inject native-only secrets (for example API keys)
-- apply dynamic pinning through `ApproovURLSession`
+- let `ApproovURLSession` inject the Approov token and apply dynamic pinning
 
 The bridge creates that controlled path by rerouting supported browser calls into native code.
 
@@ -82,12 +80,12 @@ These flags are useful for demos and troubleshooting.
 
 Behavior:
 - wraps `window.fetch`
-- only proxies `http:` and `https:` URLs
+- only proxies URLs that match the protected endpoint allowlist
 - serializes method, headers, and body bytes (base64)
 - forwards payload with `nativeHandler.postMessage(payload)`
 - reconstructs a standard JS `Response` from native reply bytes
 
-For non-HTTP(S) URLs (for example `data:` or `blob:`), it falls back to original browser `fetch`.
+For non-protected URLs (including non-HTTP(S) schemes such as `data:` or `blob:`), it falls back to original browser `fetch`.
 
 ## 5.2 `XMLHttpRequest`
 
@@ -97,7 +95,7 @@ Behavior:
 - forwards requests to native with the same payload model
 - reconstructs response fields (`status`, `statusText`, headers, body, `responseType`)
 
-For non-HTTP(S) URLs, it creates and wires a real original `XMLHttpRequest` fallback.
+For non-protected URLs, it creates and wires a real original `XMLHttpRequest` fallback.
 
 ## 5.3 HTML form submission
 
@@ -159,11 +157,7 @@ This gives a request/response RPC-style boundary between page JS and native Swif
 2. Sync WebKit cookies into native `HTTPCookieStorage`.
 3. Apply browser context headers (`Referer`, and `Origin` for state-changing methods) when missing.
 4. Apply app-specific `mutateRequest` callback for native-only headers/secrets.
-5. If URL is configured for protection:
-   - lazy initialize Approov SDK
-   - fetch Approov token
-   - set `approov-token` header if token exists
-   - enable per-request pinning metadata
+5. Lazy initialize the Approov service layer for protected requests.
 6. Execute with `ApproovURLSession.dataTask(...)` (not `data(for:)`) so Approov interception/pinning path is used.
 7. Sync cookies back from native storage into WebKit.
 8. Return response payload or simulated navigation load.
@@ -171,15 +165,15 @@ This gives a request/response RPC-style boundary between page JS and native Swif
 ## 9. Approov Policy Branches
 
 Protection decision:
-- `shouldAttemptApproovProtection(url)` determines whether token/pinning should be attempted.
+- `protectedEndpoints` determines whether a page request is proxied into native code at all.
 
 Failure policy:
 - `allowRequestsWithoutApproovToken = false`: fail closed, request is rejected.
 - `allowRequestsWithoutApproovToken = true`: fail open, request can continue without token.
 
 Pinning policy:
-- pinning is enabled per request when token was obtained in this flow.
-- a request property key (`ApproovWebViewBridge.PinningEnabled`) is used to communicate that decision to the Approov mutator without exposing it as an HTTP header.
+- pinning is handled by `ApproovURLSession` for requests that match the protected allowlist.
+- if fail-open is enabled and Approov cannot produce a token, the request can still continue without one.
 
 ## 10. Response Contract (Native -> JS)
 

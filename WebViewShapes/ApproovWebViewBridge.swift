@@ -7,7 +7,7 @@
 //  Production goal:
 //  - protect the request mechanisms that real WebView apps commonly use for
 //    app data exchange: Fetch, XMLHttpRequest, and HTML form submission.
-//  - keep Approov token acquisition, cookie handling, and native-only header
+//  - keep cookie handling, Approov service-layer setup, and native-only header
 //    injection in one place that can be copied to another app.
 //
 //  Important platform boundary:
@@ -15,8 +15,9 @@
 //    arbitrary built-in `https://` subresource pipeline before requests leave
 //    the networking process.
 //  - because of that, this bridge installs a document-start JavaScript shim
-//    that forwards Fetch, XHR, and current-frame form submissions into native
-//    Swift, where Approov can add a JWT and any native-only headers.
+//    that forwards only protected Fetch, XHR, and current-frame form
+//    submissions into native Swift, where Approov can protect the request and
+//    native code can add any extra app-specific headers.
 //  - if a form submission is meant to navigate the current frame, the native
 //    response is pushed back into WKWebView using `loadSimulatedRequest(...)`
 //    so the resulting page still loads in the WebView under the expected URL.
@@ -24,12 +25,15 @@
 //  Reuse guidance:
 //  - copy this file into another app.
 //  - create your own `ApproovWebViewConfiguration`.
-//  - decide which URLs should attempt Approov protection.
-//  - use `mutateRequest` for native-only headers such as API keys.
+//  - define a strict `protectedEndpoints` allowlist for the API traffic that
+//    should leave WebKit and run through Approov.
+//  - use `mutateRequest` for native-only headers such as API keys; the bridge
+//    applies it inside the composed `ApproovServiceMutator`.
 //  - keep API traffic on Fetch, XHR, or current-frame form submits if you want
 //    this bridge to mediate it.
 //
 
+import Approov
 import ApproovURLSession
 import Foundation
 import OSLog
@@ -44,6 +48,51 @@ import WebKit
 enum ApproovWebViewContent {
     case htmlString(String, baseURL: URL?)
     case request(URLRequest)
+}
+
+/// Declares a protected API surface that should be routed into native code.
+///
+/// Requests that do not match one of these entries stay on the normal WebKit
+/// networking stack and are never proxied through `ApproovURLSession`.
+struct ApproovWebViewProtectedEndpoint: Sendable, Encodable {
+    let scheme: String
+    let host: String
+    let pathPrefix: String
+
+    init(
+        scheme: String = "https",
+        host: String,
+        pathPrefix: String
+    ) {
+        self.scheme = scheme.lowercased()
+        self.host = host.lowercased()
+        self.pathPrefix = Self.normalizePathPrefix(pathPrefix)
+    }
+
+    func matches(_ url: URL) -> Bool {
+        guard let urlScheme = url.scheme?.lowercased(),
+              let urlHost = url.host?.lowercased(),
+              urlScheme == scheme,
+              urlHost == host else {
+            return false
+        }
+
+        let urlPath = url.path.isEmpty ? "/" : url.path
+        if pathPrefix == "/" {
+            return true
+        }
+
+        return urlPath == pathPrefix || urlPath.hasPrefix(pathPrefix + "/")
+    }
+
+    private static func normalizePathPrefix(_ pathPrefix: String) -> String {
+        let trimmed = pathPrefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return "/"
+        }
+
+        return trimmed.hasPrefix("/") ? trimmed : "/" + trimmed
+    }
 }
 
 /// Holds the generic policy for an Approov-protected WebView.
@@ -68,16 +117,16 @@ struct ApproovWebViewConfiguration: Sendable {
     /// JWT. `false` means the bridge rejects the request instead.
     let allowRequestsWithoutApproovToken: Bool
 
-    /// Decides which URLs should attempt Approov protection.
-    ///
-    /// All intercepted requests are executed natively. This closure decides
-    /// which of those requests should also attempt to obtain an Approov JWT.
-    let shouldAttemptApproovProtection: @Sendable (URL) -> Bool
+    /// The strict allowlist of page requests that should be proxied into native
+    /// networking and protected by `ApproovURLSession`.
+    let protectedEndpoints: [ApproovWebViewProtectedEndpoint]
 
     /// Gives the host app one place to apply native-only mutations.
     ///
     /// Typical uses include injecting API keys, tenant headers, or other
-    /// values that must never be exposed to web content.
+    /// values that must never be exposed to web content. The bridge applies
+    /// this inside the composed `ApproovServiceMutator` so the request is
+    /// mutated as part of the `ApproovURLSession` pipeline.
     let mutateRequest: @Sendable (URLRequest) -> URLRequest
 
     /// Logging metadata used by `OSLog`.
@@ -86,22 +135,26 @@ struct ApproovWebViewConfiguration: Sendable {
 
     init(
         approovConfig: String,
+        protectedEndpoints: [ApproovWebViewProtectedEndpoint],
         bridgeHandlerName: String = "approovBridge",
         approovTokenHeaderName: String = "approov-token",
         allowRequestsWithoutApproovToken: Bool = false,
-        shouldAttemptApproovProtection: @escaping @Sendable (URL) -> Bool,
         mutateRequest: @escaping @Sendable (URLRequest) -> URLRequest = { $0 },
         loggerSubsystem: String = Bundle.main.bundleIdentifier ?? "ApproovWebView",
         loggerCategory: String = "ApproovWebViewBridge"
     ) {
         self.approovConfig = approovConfig
+        self.protectedEndpoints = protectedEndpoints
         self.bridgeHandlerName = bridgeHandlerName
         self.approovTokenHeaderName = approovTokenHeaderName
         self.allowRequestsWithoutApproovToken = allowRequestsWithoutApproovToken
-        self.shouldAttemptApproovProtection = shouldAttemptApproovProtection
         self.mutateRequest = mutateRequest
         self.loggerSubsystem = loggerSubsystem
         self.loggerCategory = loggerCategory
+    }
+
+    func isProtectedEndpoint(_ url: URL) -> Bool {
+        protectedEndpoints.contains { $0.matches(url) }
     }
 }
 
@@ -165,7 +218,7 @@ private enum ApproovWebViewBridgeError: LocalizedError {
     case unsupportedScheme(String)
     case invalidRequestBody
     case approovConfigEmpty
-    case approovTokenUnavailable(String)
+    case requestNotProtected(String)
     case nonHTTPResponse
     case webViewUnavailable
 
@@ -179,8 +232,8 @@ private enum ApproovWebViewBridgeError: LocalizedError {
             return "The WebView request body was not valid base64."
         case .approovConfigEmpty:
             return "The Approov config string is empty."
-        case let .approovTokenUnavailable(url):
-            return "Approov did not produce a JWT for \(url)."
+        case let .requestNotProtected(url):
+            return "The WebView tried to proxy an unprotected request through native code: \(url)"
         case .nonHTTPResponse:
             return "Native networking returned a non-HTTP response."
         case .webViewUnavailable:
@@ -227,8 +280,9 @@ private final class ApproovWebViewCookieBridge {
 /// The actor keeps the stateful pieces together:
 /// - Approov SDK lazy initialization
 /// - cookie synchronization between WebKit and URLSession
-/// - request mutation and token injection
-/// - dynamic pinning for protected requests via `ApproovURLSession`
+/// - request mutation before the request reaches Approov
+/// - execution through `ApproovURLSession`, which applies token injection and
+///   pinning for protected requests
 /// - the choice between returning a JavaScript response and loading a
 ///   navigation result back into the WebView
 ///
@@ -238,18 +292,11 @@ private final class ApproovWebViewCookieBridge {
 /// we must execute requests through the completion-handler `dataTask(...)`
 /// path and wrap that in async/await ourselves.
 private actor ApproovWebViewRequestExecutor {
-    /// Internal request metadata key used to tell the Approov mutator whether
-    /// dynamic pinning should be applied to a specific request.
-    ///
-    /// We store this as a URL loading-system property so it stays out of the
-    /// wire-visible HTTP headers.
-    private static let pinningEnabledRequestProperty = "ApproovWebViewBridge.PinningEnabled"
-
     private let configuration: ApproovWebViewConfiguration
     private let cookieBridge: ApproovWebViewCookieBridge
-    private let logger: Logger
     private let cookieStorage = HTTPCookieStorage()
     private let urlSession: ApproovURLSession
+    private let scopeID = UUID().uuidString
     private var didInitializeApproov = false
 
     init(
@@ -258,10 +305,6 @@ private actor ApproovWebViewRequestExecutor {
     ) {
         self.configuration = configuration
         self.cookieBridge = cookieBridge
-        self.logger = Logger(
-            subsystem: configuration.loggerSubsystem,
-            category: configuration.loggerCategory
-        )
 
         let sessionConfiguration = URLSessionConfiguration.ephemeral
         sessionConfiguration.httpCookieStorage = cookieStorage
@@ -275,31 +318,17 @@ private actor ApproovWebViewRequestExecutor {
     /// Executes a page-originated request natively.
     func execute(_ proxyRequest: ApproovWebViewProxyRequest) async throws -> ApproovWebViewExecutionResult {
         let requestContext = try makeRequestContext(from: proxyRequest)
-        try await synchronizeCookiesIntoNativeStorage()
-
-        var request = requestContext.request
-
-        // Give the host app a single generic hook for native-only request
-        // customization before the request is executed.
-        request = configuration.mutateRequest(request)
-
-        var shouldApplyApproovPinning = false
-
-        if configuration.shouldAttemptApproovProtection(requestContext.requestURL) {
-            if let approovToken = try await fetchApproovTokenIfPossible(for: requestContext.requestURL) {
-                request.setValue(
-                    approovToken,
-                    forHTTPHeaderField: configuration.approovTokenHeaderName
-                )
-                shouldApplyApproovPinning = true
-            } else if !configuration.allowRequestsWithoutApproovToken {
-                throw ApproovWebViewBridgeError.approovTokenUnavailable(
-                    requestContext.requestURL.absoluteString
-                )
-            }
+        guard configuration.isProtectedEndpoint(requestContext.requestURL) else {
+            throw ApproovWebViewBridgeError.requestNotProtected(
+                requestContext.requestURL.absoluteString
+            )
         }
 
-        Self.setPinningEnabled(shouldApplyApproovPinning, on: &request)
+        try await synchronizeCookiesIntoNativeStorage()
+        try initializeApproovIfNeeded()
+
+        var request = requestContext.request
+        ApproovWebViewServiceMutator.setWebViewScope(scopeID, on: &request)
 
         let (data, response) = try await performPinnedRequest(request)
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -441,66 +470,19 @@ private actor ApproovWebViewRequestExecutor {
             throw ApproovWebViewBridgeError.approovConfigEmpty
         }
 
+        ApproovWebViewServiceMutator.installOrUpdateScope(
+            scopeID: scopeID,
+            configuration: configuration
+        )
         try ApproovService.initialize(config: trimmedConfig)
-        // The bridge adds the JWT manually, but configuring the same header
-        // name in the Approov service keeps the contract aligned with the rest
-        // of the app if the SDK is reused elsewhere.
+        // Keep the configured header aligned with the protected WebView flow.
         ApproovService.setApproovHeader(
             header: configuration.approovTokenHeaderName,
             prefix: ""
         )
-        ApproovService.setServiceMutator(
-            ApproovWebViewPinningMutator(
-                shouldApplyPinning: { [configuration] request in
-                    Self.shouldApplyPinning(
-                        for: request,
-                        fallback: configuration.shouldAttemptApproovProtection
-                    )
-                }
-            )
-        )
+        ApproovService.setDevKey(devKey: "l_zPzVpmXN8oKwQ-")
 
         didInitializeApproov = true
-    }
-
-    /// Attempts to obtain a JWT from Approov for the provided URL.
-    ///
-    /// If the bridge is configured to fail open, Approov failures are logged
-    /// and the request proceeds without the token.
-    private func fetchApproovTokenIfPossible(for url: URL) async throws -> String? {
-        do {
-            try initializeApproovIfNeeded()
-            let token = try await fetchApproovToken(for: url)
-
-            guard !token.isEmpty else {
-                throw ApproovWebViewBridgeError.approovTokenUnavailable(url.absoluteString)
-            }
-
-            return token
-        } catch {
-            guard configuration.allowRequestsWithoutApproovToken else {
-                throw error
-            }
-
-            logger.notice(
-                "Proceeding without an Approov JWT for \(url.absoluteString, privacy: .public): \(error.localizedDescription, privacy: .public)"
-            )
-            return nil
-        }
-    }
-
-    /// Wraps the synchronous SDK call in async/await.
-    private func fetchApproovToken(for url: URL) async throws -> String {
-        try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                do {
-                    let token = try ApproovService.fetchToken(url: url.absoluteString)
-                    continuation.resume(returning: token)
-                } catch {
-                    continuation.resume(throwing: error)
-                }
-            }
-        }
     }
 
     /// Executes the request through `ApproovURLSession` so the session's
@@ -574,56 +556,210 @@ private actor ApproovWebViewRequestExecutor {
 
         return "\(scheme)://\(host)"
     }
+}
 
-    private static func setPinningEnabled(_ enabled: Bool, on request: inout URLRequest) {
+/// Composes the host app's existing `ApproovServiceMutator` with the
+/// WebView package's own allowlist and request-tagging rules.
+///
+/// Only requests marked as originating from this bridge are constrained by the
+/// package allowlist. Other `ApproovURLSession` usage in the host app keeps
+/// flowing through the previously-installed mutator.
+private final class ApproovWebViewServiceMutator: ApproovServiceMutator {
+    private struct ScopePolicy {
+        let protectedEndpoints: [ApproovWebViewProtectedEndpoint]
+        let allowRequestsWithoutApproovToken: Bool
+        let mutateRequest: @Sendable (URLRequest) -> URLRequest
+    }
+
+    private static let requestScopeProperty = "ApproovWebViewBridge.ScopeID"
+    private static let stateQueue = DispatchQueue(
+        label: "ApproovWebViewServiceMutator.state",
+        qos: .userInitiated
+    )
+    private static var scopePolicies: [String: ScopePolicy] = [:]
+
+    private let baseMutator: ApproovServiceMutator
+
+    init(baseMutator: ApproovServiceMutator) {
+        self.baseMutator = baseMutator
+    }
+
+    static func installOrUpdateScope(
+        scopeID: String,
+        configuration: ApproovWebViewConfiguration
+    ) {
+        stateQueue.sync {
+            scopePolicies[scopeID] = ScopePolicy(
+                protectedEndpoints: configuration.protectedEndpoints,
+                allowRequestsWithoutApproovToken: configuration.allowRequestsWithoutApproovToken,
+                mutateRequest: configuration.mutateRequest
+            )
+        }
+
+        let currentMutator = ApproovService.getServiceMutator()
+        guard !(currentMutator is ApproovWebViewServiceMutator) else {
+            return
+        }
+
+        ApproovService.setServiceMutator(
+            ApproovWebViewServiceMutator(baseMutator: currentMutator)
+        )
+    }
+
+    static func setWebViewScope(_ scopeID: String, on request: inout URLRequest) {
         let mutableRequest = (request as NSURLRequest).mutableCopy() as! NSMutableURLRequest
         URLProtocol.setProperty(
-            enabled,
-            forKey: pinningEnabledRequestProperty,
+            scopeID,
+            forKey: requestScopeProperty,
             in: mutableRequest
         )
         request = mutableRequest as URLRequest
     }
 
-    private static func shouldApplyPinning(
-        for request: URLRequest,
-        fallback: (URL) -> Bool
-    ) -> Bool {
-        if let explicitDecision = URLProtocol.property(
-            forKey: pinningEnabledRequestProperty,
+    private static func scopeID(for request: URLRequest) -> String? {
+        URLProtocol.property(
+            forKey: requestScopeProperty,
             in: request
-        ) as? Bool {
-            return explicitDecision
+        ) as? String
+    }
+
+    private static func scopePolicy(for request: URLRequest) -> ScopePolicy? {
+        guard let scopeID = scopeID(for: request) else {
+            return nil
         }
 
+        return stateQueue.sync {
+            scopePolicies[scopeID]
+        }
+    }
+
+    private static func policies(matching urlString: String) -> [ScopePolicy] {
+        guard let url = URL(string: urlString) else {
+            return []
+        }
+
+        return stateQueue.sync {
+            scopePolicies.values.filter { policy in
+                policy.protectedEndpoints.contains { $0.matches(url) }
+            }
+        }
+    }
+
+    private func isAllowedWebViewRequest(
+        _ request: URLRequest,
+        policy: ScopePolicy
+    ) -> Bool {
         guard let url = request.url else {
             return false
         }
 
-        return fallback(url)
-    }
-}
-
-/// Customizes the Approov URLSession wrapper so this bridge can use:
-/// - manual JWT fetch and fail-open/fail-closed behavior from app policy
-/// - Approov dynamic pinning for requests that actually received Approov
-///   protection
-///
-/// The interceptor is disabled because the bridge already owns token fetching
-/// and request mutation. Pinning remains enabled on a per-request basis.
-private final class ApproovWebViewPinningMutator: ApproovServiceMutator {
-    private nonisolated(unsafe) let shouldApplyPinning: @Sendable (URLRequest) -> Bool
-
-    nonisolated init(shouldApplyPinning: @escaping @Sendable (URLRequest) -> Bool) {
-        self.shouldApplyPinning = shouldApplyPinning
+        return policy.protectedEndpoints.contains { $0.matches(url) }
     }
 
-    nonisolated func handleInterceptorShouldProcessRequest(_ request: URLRequest) throws -> Bool {
-        false
+    func handlePrecheckResult(_ approovResults: ApproovTokenFetchResult) throws {
+        try baseMutator.handlePrecheckResult(approovResults)
     }
 
-    nonisolated func handlePinningShouldProcessRequest(_ request: URLRequest) -> Bool {
-        shouldApplyPinning(request)
+    func handleFetchTokenResult(_ approovResults: ApproovTokenFetchResult) throws {
+        try baseMutator.handleFetchTokenResult(approovResults)
+    }
+
+    func handleFetchSecureStringResult(
+        _ approovResults: ApproovTokenFetchResult,
+        operation: String,
+        key: String
+    ) throws {
+        try baseMutator.handleFetchSecureStringResult(
+            approovResults,
+            operation: operation,
+            key: key
+        )
+    }
+
+    func handleFetchCustomJWTResult(_ approovResults: ApproovTokenFetchResult) throws {
+        try baseMutator.handleFetchCustomJWTResult(approovResults)
+    }
+
+    func handleInterceptorShouldProcessRequest(_ request: URLRequest) throws -> Bool {
+        if let scopePolicy = Self.scopePolicy(for: request) {
+            guard isAllowedWebViewRequest(request, policy: scopePolicy) else {
+                return false
+            }
+        }
+
+        return try baseMutator.handleInterceptorShouldProcessRequest(request)
+    }
+
+    func handleInterceptorFetchTokenResult(
+        _ approovResults: ApproovTokenFetchResult,
+        url: String
+    ) throws -> Bool {
+        do {
+            return try baseMutator.handleInterceptorFetchTokenResult(
+                approovResults,
+                url: url
+            )
+        } catch let error as ApproovError {
+            let matchingPolicies = Self.policies(matching: url)
+            let canFailOpen = !matchingPolicies.isEmpty
+                && matchingPolicies.allSatisfy(\.allowRequestsWithoutApproovToken)
+
+            if canFailOpen {
+                switch error {
+                case .networkingError:
+                    return false
+                default:
+                    break
+                }
+            }
+
+            throw error
+        }
+    }
+
+    func handleInterceptorHeaderSubstitutionResult(
+        _ approovResults: ApproovTokenFetchResult,
+        header: String
+    ) throws -> Bool {
+        try baseMutator.handleInterceptorHeaderSubstitutionResult(
+            approovResults,
+            header: header
+        )
+    }
+
+    func handleInterceptorQueryParamSubstitutionResult(
+        _ approovResults: ApproovTokenFetchResult,
+        queryKey: String
+    ) throws -> Bool {
+        try baseMutator.handleInterceptorQueryParamSubstitutionResult(
+            approovResults,
+            queryKey: queryKey
+        )
+    }
+
+    func handleInterceptorProcessedRequest(
+        _ request: URLRequest,
+        changes: ApproovRequestMutations
+    ) throws -> URLRequest {
+        let processedRequest = try baseMutator.handleInterceptorProcessedRequest(
+            request,
+            changes: changes
+        )
+
+        guard let scopePolicy = Self.scopePolicy(for: processedRequest) else {
+            return processedRequest
+        }
+
+        return scopePolicy.mutateRequest(processedRequest)
+    }
+
+    func handlePinningShouldProcessRequest(_ request: URLRequest) -> Bool {
+        if let scopePolicy = Self.scopePolicy(for: request),
+           !isAllowedWebViewRequest(request, policy: scopePolicy) {
+            return false
+        }
+
+        return baseMutator.handlePinningShouldProcessRequest(request)
     }
 }
 
@@ -640,7 +776,8 @@ private enum ApproovWebViewFactory {
         // race Fetch, XHR, or form submission before the native wrappers exist.
         let bridgeScript = WKUserScript(
             source: ApproovWebViewJavaScriptBridge.scriptSource(
-                handlerName: configuration.bridgeHandlerName
+                handlerName: configuration.bridgeHandlerName,
+                protectedEndpoints: configuration.protectedEndpoints
             ),
             injectionTime: .atDocumentStart,
             // Production pages often use iframes. Injecting into all frames
@@ -864,14 +1001,36 @@ final class ApproovWebViewController: UIViewController {
 /// limits, not omissions in the sample.
 private enum ApproovWebViewJavaScriptBridge {
     private static let handlerPlaceholder = "__APPROOV_BRIDGE_HANDLER__"
+    private static let protectedEndpointsPlaceholder = "__APPROOV_PROTECTED_ENDPOINTS__"
 
-    static func scriptSource(handlerName: String) -> String {
-        template.replacingOccurrences(of: handlerPlaceholder, with: handlerName)
+    static func scriptSource(
+        handlerName: String,
+        protectedEndpoints: [ApproovWebViewProtectedEndpoint]
+    ) -> String {
+        template
+            .replacingOccurrences(of: handlerPlaceholder, with: handlerName)
+            .replacingOccurrences(
+                of: protectedEndpointsPlaceholder,
+                with: protectedEndpointsJSON(protectedEndpoints)
+            )
+    }
+
+    private static func protectedEndpointsJSON(
+        _ protectedEndpoints: [ApproovWebViewProtectedEndpoint]
+    ) -> String {
+        let encoder = JSONEncoder()
+        guard let data = try? encoder.encode(protectedEndpoints),
+              let json = String(data: data, encoding: .utf8) else {
+            return "[]"
+        }
+
+        return json
     }
 
     private static let template = #"""
     (() => {
       const nativeHandler = window.webkit?.messageHandlers?.__APPROOV_BRIDGE_HANDLER__;
+      const protectedEndpoints = __APPROOV_PROTECTED_ENDPOINTS__;
       if (!nativeHandler || typeof nativeHandler.postMessage !== "function") {
         return;
       }
@@ -914,10 +1073,24 @@ private enum ApproovWebViewJavaScriptBridge {
 
       // Only proxy ordinary HTTP(S) traffic. Browser-only schemes such as
       // `data:` or `blob:` should keep using the browser stack directly.
-      const isNativeProxyCandidate = (urlString) => {
+      const isProtectedEndpoint = (urlString) => {
         try {
           const resolvedURL = new URL(urlString, window.location.href);
-          return resolvedURL.protocol === "http:" || resolvedURL.protocol === "https:";
+          if (resolvedURL.protocol !== "http:" && resolvedURL.protocol !== "https:") {
+            return false;
+          }
+
+          const hostname = resolvedURL.hostname.toLowerCase();
+          const pathname = resolvedURL.pathname || "/";
+          return protectedEndpoints.some((entry) => {
+            const pathPrefix = entry.pathPrefix || "/";
+            const schemeMatches = resolvedURL.protocol === `${entry.scheme}:`;
+            const hostMatches = hostname === entry.host;
+            const pathMatches = pathPrefix === "/"
+              ? true
+              : pathname === pathPrefix || pathname.startsWith(`${pathPrefix}/`);
+            return schemeMatches && hostMatches && pathMatches;
+          });
         } catch (_error) {
           return false;
         }
@@ -1111,7 +1284,7 @@ private enum ApproovWebViewJavaScriptBridge {
         }
 
         const actionURL = resolveFormAction(form, submitter);
-        if (!isNativeProxyCandidate(actionURL)) {
+        if (!isProtectedEndpoint(actionURL)) {
           return false;
         }
 
@@ -1172,7 +1345,7 @@ private enum ApproovWebViewJavaScriptBridge {
           ? input
           : new Request(input, init);
 
-        if (!isNativeProxyCandidate(request.url)) {
+        if (!isProtectedEndpoint(request.url)) {
           return originalFetch(input, init);
         }
 
@@ -1215,7 +1388,7 @@ private enum ApproovWebViewJavaScriptBridge {
           this._responseHeaders = {};
           this._fallback = null;
 
-          if (!isNativeProxyCandidate(this._url)) {
+          if (!isProtectedEndpoint(this._url)) {
             this._fallback = new OriginalXMLHttpRequest();
             this._wireFallback();
             this._fallback.responseType = this.responseType;

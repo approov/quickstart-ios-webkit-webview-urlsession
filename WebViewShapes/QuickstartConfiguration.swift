@@ -20,8 +20,7 @@ enum QuickstartConfiguration {
     /// In production, many teams prefer to inject this at build time via xcconfig
     /// or environment-specific build settings. It is hardcoded here so the
     /// quickstart is self-contained.
-    private static let approovConfig = "#cb-adriant#thisShouldBeReplacedWithYourOwnConfigString#"
-
+    private static let approovConfig = "#cb-adriant#RyZqOkFZZAUP9JMH7TgJvQzlqe8c1D+8JjCgIbwrIKc="
     /// The protected API endpoint used by the Shapes demo page inside the WebView.
     static let shapesEndpoint = URL(string: "https://shapes.approov.io/v2/shapes")!
 
@@ -34,13 +33,16 @@ enum QuickstartConfiguration {
     /// The reusable bridge configuration given to `ApproovWebView`.
     static let webViewConfiguration = ApproovWebViewConfiguration(
         approovConfig: approovConfig,
+        protectedEndpoints: [
+            ApproovWebViewProtectedEndpoint(
+                host: "shapes.approov.io",
+                pathPrefix: "/v2/shapes"
+            )
+        ],
         approovTokenHeaderName: "approov-token",
         // This quickstart uses fail-open semantics because the earlier request
         // asked for the API call to proceed even if Approov cannot produce a JWT.
         allowRequestsWithoutApproovToken: true,
-        shouldAttemptApproovProtection: { url in
-            url.host?.lowercased() == shapesEndpoint.host?.lowercased()
-        },
         mutateRequest: { request in
             var request = request
 
