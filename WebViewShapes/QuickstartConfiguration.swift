@@ -7,11 +7,12 @@
 //  Reuse guidance:
 //  - In a real app, this is the only place most teams should need to edit.
 //  - Keep the generic bridge implementation untouched in
-//    `ApproovWebViewBridge.swift`.
+//    `ApproovServiceWebView`.
 //  - Swap in your own Approov config string, API domains, and any native-only
 //    header mutations.
 //
 
+import ApproovServiceWebView
 import Foundation
 
 enum QuickstartConfiguration {
@@ -40,6 +41,7 @@ enum QuickstartConfiguration {
             )
         ],
         approovTokenHeaderName: "approov-token",
+        approovDevelopmentKey: "l_zPzVpmXN8oKwQ-",
         // This quickstart uses fail-open semantics because the earlier request
         // asked for the API call to proceed even if Approov cannot produce a JWT.
         allowRequestsWithoutApproovToken: true,

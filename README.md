@@ -125,7 +125,7 @@ flowchart LR
 
 ## What This Quickstart Covers
 
-The reusable bridge in `WebViewShapes/ApproovWebViewBridge.swift` covers:
+The reusable bridge in `approov-service-ios-webview/Sources/ApproovServiceWebView/ApproovWebViewBridge.swift` covers:
 
 - `fetch`
 - `XMLHttpRequest`
@@ -165,13 +165,15 @@ The safest production patterns are:
 
 ## Project Structure
 
-- `WebViewShapes/ApproovWebViewBridge.swift`
+- `approov-service-ios-webview/`
+  - Local Swift package for the reusable WebView service layer.
+  - Exposes the `ApproovServiceWebView` product for Swift Package Manager consumers.
+- `approov-service-ios-webview/Sources/ApproovServiceWebView/ApproovWebViewBridge.swift`
   - Reusable bridge code.
   - Includes both the SwiftUI `ApproovWebView` wrapper and the UIKit `ApproovWebViewController`.
-  - This is the file to copy into another app.
 - `WebViewShapes/QuickstartConfiguration.swift`
   - Demo-specific configuration.
-  - This is the file most adopters should edit first.
+  - This is the file most adopters should mirror first when wiring the package into their own app.
 - `WebViewShapes/ShapesQuickstartPage.swift`
   - Local demo HTML loaded into the WebView.
   - Demonstrates both `fetch()` and real HTML form submission.
@@ -197,7 +199,7 @@ If you only want one style in your own app:
   - In `ContentView.swift`, comment out the UIKit demo case
 - UIKit-only app
   - Keep `ApproovWebViewController`
-  - Delete `ApproovWebView` and `import SwiftUI` from `ApproovWebViewBridge.swift`
+  - Delete `ApproovWebView` and `import SwiftUI` from the package bridge source if you are forking it
   - In `ContentView.swift`, comment out the SwiftUI demo case
 
 ## Production Notes
@@ -275,17 +277,20 @@ If you adapt this quickstart to your own backend, the server must validate the J
 
 ### 1. Add the package dependency
 
-This project uses:
+This project now includes a local package:
+
+- `approov-service-ios-webview`
+
+The package depends on:
 
 - `https://github.com/approov/approov-service-urlsession.git`
+- `https://github.com/approov/approov-ios-sdk.git`
 
-That package brings in the Approov iOS SDK used by the bridge.
+### 2. Import the package product
 
-### 2. Copy the bridge file
+Import:
 
-Copy:
-
-- `WebViewShapes/ApproovWebViewBridge.swift`
+- `ApproovServiceWebView`
 
 ### 3. Create your own configuration
 
@@ -302,6 +307,7 @@ let config = ApproovWebViewConfiguration(
     ],
     approovTokenHeaderName: "approov-token",
     allowRequestsWithoutApproovToken: false,
+    approovDevelopmentKey: "<your-dev-key>",
     mutateRequest: { request in
         var request = request
 

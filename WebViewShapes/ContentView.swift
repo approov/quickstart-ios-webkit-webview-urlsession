@@ -9,6 +9,7 @@
 //  reference.
 //
 
+import ApproovServiceWebView
 import SwiftUI
 
 struct ContentView: View {

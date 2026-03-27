@@ -7,7 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		E23B5F7B2F5B3F210096AB83 /* ApproovURLSession in Frameworks */ = {isa = PBXBuildFile; productRef = E23B5F7B2F5B3A600096AB83 /* ApproovURLSession */; };
+		E23B5F7B2F5B3F210096AB83 /* ApproovServiceWebView in Frameworks */ = {isa = PBXBuildFile; productRef = E23B5F7B2F5B3A600096AB83 /* ApproovServiceWebView */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -27,7 +27,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				E23B5F7B2F5B3F210096AB83 /* ApproovURLSession in Frameworks */,
+				E23B5F7B2F5B3F210096AB83 /* ApproovServiceWebView in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -70,7 +70,7 @@
 			);
 			name = WebViewShapes;
 			packageProductDependencies = (
-				E23B5F7B2F5B3A600096AB83 /* ApproovURLSession */,
+				E23B5F7B2F5B3A600096AB83 /* ApproovServiceWebView */,
 			);
 			productName = WebViewShapes;
 			productReference = E23B5F6D2F5B3A4D0096AB83 /* WebViewShapes.app */;
@@ -101,7 +101,7 @@
 			mainGroup = E23B5F642F5B3A4D0096AB83;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				E23B5F7C2F5B3A600096AB83 /* XCRemoteSwiftPackageReference "approov-service-urlsession" */,
+				E23B5F7C2F5B3A600096AB83 /* XCLocalSwiftPackageReference "approov-service-ios-webview" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = E23B5F6E2F5B3A4D0096AB83 /* Products */;
@@ -344,22 +344,18 @@
 		};
 /* End XCConfigurationList section */
 
-/* Begin XCRemoteSwiftPackageReference section */
-		E23B5F7C2F5B3A600096AB83 /* XCRemoteSwiftPackageReference "approov-service-urlsession" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/approov/approov-service-urlsession.git";
-			requirement = {
-				kind = exactVersion;
-				version = 3.5.6;
-			};
+/* Begin XCLocalSwiftPackageReference section */
+		E23B5F7C2F5B3A600096AB83 /* XCLocalSwiftPackageReference "approov-service-ios-webview" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = "approov-service-ios-webview";
 		};
-/* End XCRemoteSwiftPackageReference section */
+/* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		E23B5F7B2F5B3A600096AB83 /* ApproovURLSession */ = {
+		E23B5F7B2F5B3A600096AB83 /* ApproovServiceWebView */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = E23B5F7C2F5B3A600096AB83 /* XCRemoteSwiftPackageReference "approov-service-urlsession" */;
-			productName = ApproovURLSession;
+			package = E23B5F7C2F5B3A600096AB83 /* XCLocalSwiftPackageReference "approov-service-ios-webview" */;
+			productName = ApproovServiceWebView;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
