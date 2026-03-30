@@ -24,8 +24,8 @@ struct ContentView: View {
                 )
             } else {
                 List {
-                    Section("Host Demo") {
-                ForEach(HostDemo.allCases) { demo in
+                    Section("WebView Demo") {
+                        ForEach(HostDemo.allCases) { demo in
                             Button {
                                 selectedHostDemo = demo
                             } label: {
@@ -48,6 +48,7 @@ struct ContentView: View {
 private enum HostDemo: String, CaseIterable, Identifiable {
     case swiftUI
     case uiKit
+    case hostedApp
 
     var id: String { rawValue }
 
@@ -57,18 +58,21 @@ private enum HostDemo: String, CaseIterable, Identifiable {
             return "SwiftUI"
         case .uiKit:
             return "UIKit"
+        case .hostedApp:
+            return "Hosted Web App"
         }
     }
 
     var summary: String {
         switch self {
         case .swiftUI:
-            return "Uses the `ApproovWebView` SwiftUI wrapper directly."
+            return "Uses the `ApproovWebView` SwiftUI wrapper directly with the local bundled Shapes page."
         case .uiKit:
             return "Uses a native `UIViewController` host, then embeds it back into this sample with `UIViewControllerRepresentable`."
+        case .hostedApp:
+            return "Loads https://webview.example-api.com/ and protects its example-api.com/api calls through the native bridge."
         }
     }
-
 }
 
 private struct HostDemoScreen: View {
@@ -108,14 +112,19 @@ private struct HostDemoScreen: View {
         // Keep this case if you want the sample to show the SwiftUI-native host.
         case .swiftUI:
             ApproovWebView(
-                content: QuickstartConfiguration.initialContent,
-                configuration: QuickstartConfiguration.webViewConfiguration
+                content: QuickstartConfiguration.localContent,
+                configuration: QuickstartConfiguration.localWebViewConfiguration
             )
         // Keep this case if you want the sample to show the UIKit-native host.
         case .uiKit:
             UIKitApproovWebViewControllerContainer(
-                content: QuickstartConfiguration.initialContent,
-                configuration: QuickstartConfiguration.webViewConfiguration
+                content: QuickstartConfiguration.localContent,
+                configuration: QuickstartConfiguration.localWebViewConfiguration
+            )
+        case .hostedApp:
+            ApproovWebView(
+                content: QuickstartConfiguration.hostedContent,
+                configuration: QuickstartConfiguration.hostedWebViewConfiguration
             )
         }
     }

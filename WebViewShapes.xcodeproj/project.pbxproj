@@ -7,7 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		E23B5F7B2F5B3F210096AB83 /* ApproovServiceWebView in Frameworks */ = {isa = PBXBuildFile; productRef = E23B5F7B2F5B3A600096AB83 /* ApproovServiceWebView */; };
+		E27230772F7AA25A0089C6D6 /* ApproovServiceWebView in Frameworks */ = {isa = PBXBuildFile; productRef = E27230762F7AA25A0089C6D6 /* ApproovServiceWebView */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -27,7 +27,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				E23B5F7B2F5B3F210096AB83 /* ApproovServiceWebView in Frameworks */,
+				E27230772F7AA25A0089C6D6 /* ApproovServiceWebView in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -70,7 +70,7 @@
 			);
 			name = WebViewShapes;
 			packageProductDependencies = (
-				E23B5F7B2F5B3A600096AB83 /* ApproovServiceWebView */,
+				E27230762F7AA25A0089C6D6 /* ApproovServiceWebView */,
 			);
 			productName = WebViewShapes;
 			productReference = E23B5F6D2F5B3A4D0096AB83 /* WebViewShapes.app */;
@@ -101,7 +101,7 @@
 			mainGroup = E23B5F642F5B3A4D0096AB83;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				E23B5F7C2F5B3A600096AB83 /* XCLocalSwiftPackageReference "approov-service-ios-webview" */,
+				E27230752F7AA25A0089C6D6 /* XCRemoteSwiftPackageReference "approov-service-ios-webview" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = E23B5F6E2F5B3A4D0096AB83 /* Products */;
@@ -344,17 +344,21 @@
 		};
 /* End XCConfigurationList section */
 
-/* Begin XCLocalSwiftPackageReference section */
-		E23B5F7C2F5B3A600096AB83 /* XCLocalSwiftPackageReference "approov-service-ios-webview" */ = {
-			isa = XCLocalSwiftPackageReference;
-			relativePath = "approov-service-ios-webview";
+/* Begin XCRemoteSwiftPackageReference section */
+		E27230752F7AA25A0089C6D6 /* XCRemoteSwiftPackageReference "approov-service-ios-webview" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/approov/approov-service-ios-webview.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.1.0;
+			};
 		};
-/* End XCLocalSwiftPackageReference section */
+/* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		E23B5F7B2F5B3A600096AB83 /* ApproovServiceWebView */ = {
+		E27230762F7AA25A0089C6D6 /* ApproovServiceWebView */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = E23B5F7C2F5B3A600096AB83 /* XCLocalSwiftPackageReference "approov-service-ios-webview" */;
+			package = E27230752F7AA25A0089C6D6 /* XCRemoteSwiftPackageReference "approov-service-ios-webview" */;
 			productName = ApproovServiceWebView;
 		};
 /* End XCSwiftPackageProductDependency section */

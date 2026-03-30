@@ -1,5 +1,5 @@
 {
-  "originHash" : "d2cead3338752d84c75b257d8ee02adc43011aa0648c469edf1b26d98cf11932",
+  "originHash" : "8eb1244e9211e50e770fc4869efbef7a651ea975cbd3e102dfdea7338917869f",
   "pins" : [
     {
       "identity" : "approov-ios-sdk",
@@ -8,6 +8,15 @@
       "state" : {
         "revision" : "ddeee49a8116df7e48daddbe2eebcdacf642eab8",
         "version" : "3.5.3"
+      }
+    },
+    {
+      "identity" : "approov-service-ios-webview",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/approov/approov-service-ios-webview.git",
+      "state" : {
+        "revision" : "b5ccdf0a35c26841aef5154e969289edb23014c6",
+        "version" : "0.1.0"
       }
     },
     {
